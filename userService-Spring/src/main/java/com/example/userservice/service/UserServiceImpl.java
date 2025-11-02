@@ -6,6 +6,7 @@ import com.example.userservice.exception.NotFoundException;
 import com.example.userservice.kafka.UserEventProducer;
 import com.example.userservice.mapper.UserMapper;
 import com.example.userservice.repository.UserRepository;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,17 +18,17 @@ import java.util.stream.Collectors;
 public class UserServiceImpl implements UserService {
     private final UserRepository repo;
     private final UserEventProducer producer;
+
     public UserServiceImpl(UserRepository repo, UserEventProducer producer) {
         this.repo = repo;
         this.producer = producer;
     }
 
-
     @Override
     public UserDto create(UserDto userDto) {
         User u = UserMapper.toEntity(userDto);
         User saved = repo.save(u);
-        producer.sendUserEvent("CREATE", saved.getEmail());
+        sendUserEventWithCircuitBreaker("CREATE", saved.getEmail());
         return UserMapper.toDto(saved);
     }
 
@@ -46,17 +47,28 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public UserDto update(Long id, UserDto userDto) {
-        User u = repo.findById(id).orElseThrow(() -> new NotFoundException("Плзователь не найден"));
+        User u = repo.findById(id).orElseThrow(() -> new NotFoundException("Пользователь не найден"));
         UserMapper.updateEntityFromDto(userDto, u);
         User saved = repo.save(u);
+        sendUserEventWithCircuitBreaker("UPDATE", saved.getEmail());
         return UserMapper.toDto(saved);
     }
 
     @Override
     public void delete(Long id) {
-        if (!repo.existsById(id)) throw new NotFoundException("Плзователь не найден");
-        producer.sendUserEvent("DELETE", repo.getReferenceById(id).getEmail());
+        if (!repo.existsById(id)) throw new NotFoundException("Пользователь не найден");
+        String email = repo.getReferenceById(id).getEmail();
+        sendUserEventWithCircuitBreaker("DELETE", email);
         repo.deleteById(id);
+    }
 
+
+    @CircuitBreaker(name = "userEventCircuit", fallbackMethod = "fallbackUserEvent")
+    public void sendUserEventWithCircuitBreaker(String action, String email) {
+        producer.sendUserEvent(action, email);
+    }
+
+    public void fallbackUserEvent(String action, String email, Throwable t) {
+        System.out.println("Fallback: событие '" + action + "' для " + email + " не отправлено. Причина: " + t.getMessage());
     }
 }
